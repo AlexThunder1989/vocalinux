@@ -43,6 +43,22 @@ It's a free, AGPL-3.0-licensed desktop app that lets you dictate text into *any*
 
 Models are downloaded once. After that, speech-to-text stays on your machine. No Voca account is required. Just speak and type.
 
+> ### 🦜 This fork adds the Parakeet engine
+>
+> NVIDIA Parakeet TDT 0.6B through sherpa-onnx, on CPU: **v3** (25 European
+> languages, auto-detected) and **v2** (English). Punctuated and capitalized
+> output, roughly 8x faster than whisper.cpp `large-v3-turbo` on the same clips
+> here, and no upstream pywhispercpp change needed.
+>
+> ```bash
+> git clone -b feature/parakeet-engine https://github.com/AlexThunder1989/vocalinux.git
+> cd vocalinux && ./install.sh --engine=parakeet --auto
+> ```
+>
+> Tested on Ubuntu 26.04. Proposed upstream as
+> [VocaHQ/vocalinux#771](https://github.com/VocaHQ/vocalinux/pull/771);
+> everything else in this fork tracks upstream `main`.
+
 ## 📚 What's New in v0.16.1
 
 > **0.16.1** is a stability patch on the 0.16 series. Startup uses the engine's own model instead of a leftover generic key, leftover transcription no longer leaves the tray stuck, terminals get Ctrl+Shift+V paste, and the AppImage is built against a glibc Debian 12 can run. The installer now requires Python 3.11 and verifies model downloads.
