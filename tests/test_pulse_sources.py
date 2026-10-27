@@ -473,6 +473,7 @@ class TestCaptureIntegration:
     def test_audio_test_uses_the_chosen_source(self) -> None:
         mock_audio, mock_pyaudio = _pyaudio_with_one_mic()
         stream = MagicMock()
+        stream.get_read_available.return_value = 1024
         stream.read.return_value = b"\x00\x10" * 1024
         seen: Dict[str, object] = {}
 

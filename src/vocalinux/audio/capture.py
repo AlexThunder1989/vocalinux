@@ -15,8 +15,9 @@ import ctypes
 import logging
 import subprocess
 import time
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
+from .errors import CaptureStalledError
 from .pipewire import (
     PIPEWIRE_INDEX_BASE,
     _test_pipewire_input,
@@ -39,6 +40,45 @@ logger = logging.getLogger(__name__)
 
 # PortAudio frames read per capture call.
 CAPTURE_CHUNK = 1024
+
+# Match PipeWire's stall deadline; polling also bounds cancellation latency.
+STALL_TIMEOUT_SECONDS = 5.0
+_READ_POLL_SECONDS = 0.01
+_PA_INPUT_OVERFLOWED = -9981
+_PA_ALSA = 8
+
+
+def _read_frames_bounded(
+    stream: Any,
+    frames: int,
+    timeout: float = STALL_TIMEOUT_SECONDS,
+    should_continue: Optional[Callable[[], bool]] = None,
+) -> Optional[bytes]:
+    """Wait for a full chunk, returning None on cancellation or raising on stall.
+
+    Only read frames PortAudio reports as available, avoiding a blocking read
+    on a device that has stopped producing samples. Input overflows are
+    tolerated just as with ``exception_on_overflow=False``; other errors
+    belong to the caller's recovery path.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if should_continue is not None and not should_continue():
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CaptureStalledError(f"PortAudio capture stalled: no audio for {timeout:g}s")
+        try:
+            if stream.get_read_available() >= frames:
+                if should_continue is not None and not should_continue():
+                    return None
+                data: bytes = stream.read(frames, exception_on_overflow=False)
+                return data
+        except OSError as exc:
+            # PyAudio versions use either OSError.errno or args for PA codes.
+            if exc.errno != _PA_INPUT_OVERFLOWED and _PA_INPUT_OVERFLOWED not in exc.args:
+                raise
+        time.sleep(min(_READ_POLL_SECONDS, remaining))
 
 
 # ALSA error handler to suppress warnings during PyAudio initialization
@@ -398,6 +438,58 @@ def _resolve_valid_input_device(audio: Any, preferred_index: Optional[int] = Non
     return input_device_indices[0]
 
 
+def _resolve_system_default(audio: Any) -> Optional[int]:
+    """Prefer ALSA's sound-server PCM when PortAudio substituted hardware.
+
+    A real host default stays implicit. ALSA can silently promote arbitrary
+    hardware when its ``default`` PCM is busy or absent; in that case the
+    input-capable ``pulse`` PCM follows the desktop's selected microphone.
+    This only inspects enumeration metadata and never probes a stream.
+    """
+    default_info = _get_device_info_safe(audio)
+    name = default_info.get("name", "Unknown")
+    if isinstance(name, str) and (
+        name.strip().lower() in {"default", "pulse", "pipewire"} or _is_virtual_device(name)
+    ):
+        return None
+    host_api_index = default_info.get("hostApi")
+    if not isinstance(host_api_index, int):
+        return None
+    try:
+        host_info = audio.get_host_api_info_by_index(host_api_index)
+    except (IOError, OSError, TypeError, ValueError, AttributeError):
+        return None
+    if not isinstance(host_info, dict) or host_info.get("type") != _PA_ALSA:
+        return None
+
+    try:
+        device_count = int(audio.get_device_count())
+    except (IOError, OSError, TypeError, ValueError, AttributeError):
+        device_count = 0
+    for index in range(max(0, device_count)):
+        info = _get_device_info_safe(audio, index)
+        pcm_name = info.get("name", "")
+        channels = info.get("maxInputChannels", 0)
+        if (
+            isinstance(pcm_name, str)
+            and pcm_name.strip().lower() == "pulse"
+            and not _is_virtual_device(pcm_name)
+            and isinstance(channels, (int, float))
+            and channels > 0
+            and info.get("hostApi", host_api_index) == host_api_index
+        ):
+            logger.info("ALSA default resolved to '%s'; using pulse PCM [%s]", name, index)
+            return index
+
+    logger.warning(
+        "System Default resolved to ALSA device '%s' [%s]; no input-capable pulse PCM "
+        "is available. Using that fallback device.",
+        name,
+        default_info.get("index", "unknown"),
+    )
+    return None
+
+
 def _open_capture_stream(audio: Any, device_index: Optional[int] = None) -> tuple[int, int, object]:
     """
     Negotiate a working (channels, sample_rate) and return the opened stream.
@@ -663,13 +755,18 @@ def _get_supported_sample_rate(audio: Any, device_index: Optional[int], channels
     return 16000
 
 
-def test_audio_input(device_index: Optional[int] = None, duration: float = 1.0) -> dict:
+def test_audio_input(
+    device_index: Optional[int] = None,
+    duration: float = 1.0,
+    should_continue: Optional[Callable[[], bool]] = None,
+) -> dict:
     """
     Test audio input from a device and return diagnostic information.
 
     Args:
         device_index: The device index to test (None for default)
         duration: How long to record in seconds
+        should_continue: Optional predicate; False cancels the test.
 
     Returns:
         Dictionary with test results including:
@@ -693,8 +790,15 @@ def test_audio_input(device_index: Optional[int] = None, duration: float = 1.0) 
     }
 
     if is_pipewire_device_index(cast(int, device_index)):
-        return _test_pipewire_input(cast(int, device_index), duration)
+        return _test_pipewire_input(
+            cast(int, device_index), duration, should_continue=should_continue
+        )
 
+    audio: Any = None
+    stream: Any = None
+    if should_continue is not None and not should_continue():
+        result["error"] = "Audio test cancelled"
+        return result
     # A snap PulseAudio source opens through the default device with
     # PULSE_SOURCE pointing at it, so PortAudio never sees its index.
     pulse_selected, pulse_source = _resolve_pulse_selection(device_index, None)
@@ -703,6 +807,9 @@ def test_audio_input(device_index: Optional[int] = None, duration: float = 1.0) 
         device_index = None
 
     try:
+        if should_continue is not None and not should_continue():
+            result["error"] = "Audio test cancelled"
+            return result
         import numpy as np
         import pyaudio
 
@@ -711,13 +818,12 @@ def test_audio_input(device_index: Optional[int] = None, duration: float = 1.0) 
 
         audio = pyaudio.PyAudio()
 
-        # Get device info for display. Keep open_device_index as None for
-        # System Default so PortAudio opens the host default instead of an
-        # explicit pseudo-device index like "default" / DeepFilterNet (#624).
-        open_device_index = device_index
+        # Keep valid host defaults implicit; the shared resolver only pins
+        # a sound-server PCM when ALSA silently substituted hardware.
+        open_device_index = _resolve_system_default(audio) if device_index is None else device_index
         try:
-            if device_index is not None:
-                info = audio.get_device_info_by_index(device_index)
+            if open_device_index is not None:
+                info = audio.get_device_info_by_index(open_device_index)
             else:
                 info = audio.get_default_input_device_info()
             result["device_name"] = info.get("name", "Unknown")
@@ -726,7 +832,6 @@ def test_audio_input(device_index: Optional[int] = None, duration: float = 1.0) 
                 result["device_name"] = pulse_source.display_name
         except (IOError, OSError) as e:
             result["error"] = f"Cannot get device info: {e}"
-            audio.terminate()
             return result
 
         # Negotiate the format and open the capture stream in ONE PortAudio
@@ -755,7 +860,6 @@ def test_audio_input(device_index: Optional[int] = None, duration: float = 1.0) 
                     stream = audio.open(**stream_kwargs)
             except (IOError, OSError) as e:
                 result["error"] = f"Cannot open audio stream: {e}"
-                audio.terminate()
                 return result
 
         # Record and analyze
@@ -764,7 +868,10 @@ def test_audio_input(device_index: Optional[int] = None, duration: float = 1.0) 
 
         for _ in range(frames_to_read):
             try:
-                data = cast(Any, stream).read(CHUNK, exception_on_overflow=False)
+                data = _read_frames_bounded(stream, CHUNK, should_continue=should_continue)
+                if data is None:
+                    result["error"] = "Audio test cancelled"
+                    break
                 audio_data = np.frombuffer(data, dtype=np.int16)
                 amplitudes = np.abs(audio_data)
                 all_amplitudes.extend(amplitudes)
@@ -772,10 +879,9 @@ def test_audio_input(device_index: Optional[int] = None, duration: float = 1.0) 
                 result["error"] = f"Error reading audio: {e}"
                 break
 
-        _safe_close_stream(stream)
-        audio.terminate()
-
-        if all_amplitudes:
+        if should_continue is not None and not should_continue():
+            result["error"] = "Audio test cancelled"
+        if all_amplitudes and result["error"] is None:
             all_amplitudes = np.array(all_amplitudes)
             result["success"] = True
             result["sample_count"] = len(all_amplitudes)
@@ -789,6 +895,17 @@ def test_audio_input(device_index: Optional[int] = None, duration: float = 1.0) 
         result["error"] = f"Missing dependency: {e}"
     except (OSError, ValueError, RuntimeError) as e:
         result["error"] = f"Unexpected error: {e}"
+
+    finally:
+        _safe_close_stream(stream)
+        if audio is not None:
+            try:
+                audio.terminate()
+            except (OSError, ValueError, RuntimeError) as exc:
+                logger.warning("Error terminating PyAudio after audio test: %s", exc)
+                result["success"] = False
+                if result["error"] is None:
+                    result["error"] = f"Error closing audio test: {exc}"
 
     return result
 
@@ -819,6 +936,8 @@ class PortAudioCaptureSource:
     ) -> None:
         self.device_index = device_index
         self.device_name = device_name
+        self.resolved_device_name: Optional[str] = None
+        self.last_error: Optional[OSError] = None
         self.audio: Any = None
         self.stream: Any = None
         self.sample_rate = 16000
@@ -856,7 +975,7 @@ class PortAudioCaptureSource:
             self.device_index is None and self.device_name is None
         )
         if use_system_default:
-            resolved_device_index = None
+            resolved_device_index = _resolve_system_default(audio)
         else:
             resolved_device_index = _resolve_device_by_name(
                 audio, self.device_name, self.device_index
@@ -869,7 +988,7 @@ class PortAudioCaptureSource:
             logger.warning(
                 "No safe audio input devices enumerated; " "falling back to system default capture."
             )
-            resolved_device_index = None
+            resolved_device_index = _resolve_system_default(audio)
             use_system_default = True
 
         # Log available devices for debugging (skip virtual devices)
@@ -905,6 +1024,7 @@ class PortAudioCaptureSource:
                 logger.info(
                     f"Using audio device [{resolved_device_index}]: {device_info.get('name')}"
                 )
+            self.resolved_device_name = device_info.get("name")
         except (IOError, OSError):
             logger.warning(f"Could not get info for device index {resolved_device_index}")
 
@@ -922,27 +1042,25 @@ class PortAudioCaptureSource:
             "frames_per_buffer": CAPTURE_CHUNK,
         }
 
-        # Use the resolved device (skip if already system default)
-        try:
-            default_idx = audio.get_default_input_device_info().get("index")
-        except (IOError, OSError):
-            default_idx = None
-        if resolved_device_index is not None and resolved_device_index != default_idx:
+        if resolved_device_index is not None:
             stream_kwargs["input_device_index"] = resolved_device_index
 
         with pulse_source_env(pulse_name):
             self.stream = audio.open(**stream_kwargs)
 
-    def read_chunk(self) -> bytes:
+    def read_chunk(self, should_continue: Optional[Callable[[], bool]] = None) -> Optional[bytes]:
         """Read one chunk and return mono 16 kHz int16 PCM bytes.
 
         Multi-channel captures are downmixed to mono (see
         :func:`_downmix_to_mono`); devices negotiating above 16 kHz are
         resampled so every consumer sees the format speech engines expect.
+        Return None when the optional cancellation predicate becomes false.
         """
         import numpy as np
 
-        data: bytes = self.stream.read(CAPTURE_CHUNK, exception_on_overflow=False)
+        data = _read_frames_bounded(self.stream, CAPTURE_CHUNK, should_continue=should_continue)
+        if data is None:
+            return None
 
         # Convert multi-channel capture to mono if necessary
         # Speech recognition engines expect mono (1 channel) audio
@@ -966,11 +1084,14 @@ class PortAudioCaptureSource:
 
         return data
 
-    def reopen(self, audio_instance: Any) -> bool:
+    def reopen(
+        self, audio_instance: Any, should_continue: Optional[Callable[[], bool]] = None
+    ) -> bool:
         """Close the current stream and reopen on the resolved device.
 
         Args:
             audio_instance: The PyAudio instance to reconnect through.
+            should_continue: Optional predicate; False cancels validation.
 
         Returns:
             True when a new stream was opened and produced audio data.
@@ -981,11 +1102,15 @@ class PortAudioCaptureSource:
         self.audio = audio_instance
 
         new_stream: Any = None
+        self.last_error = None
         try:
             # Close existing stream if it exists
             if self.stream:
                 _safe_close_stream(self.stream)
                 self.stream = None
+
+            if should_continue is not None and not should_continue():
+                return False
 
             # Resolve a valid input device — by name first, then by index
             pulse_selected, pulse_source = _resolve_pulse_selection(
@@ -996,7 +1121,7 @@ class PortAudioCaptureSource:
                 self.device_index is None and self.device_name is None
             )
             if use_system_default:
-                resolved_device_index = None
+                resolved_device_index = _resolve_system_default(audio_instance)
             else:
                 resolved_device_index = _resolve_device_by_name(
                     audio_instance, self.device_name, self.device_index
@@ -1008,7 +1133,7 @@ class PortAudioCaptureSource:
                     "Reconnection: no safe input devices enumerated; "
                     "falling back to system default capture."
                 )
-                resolved_device_index = None
+                resolved_device_index = _resolve_system_default(audio_instance)
 
             # Negotiate the format and open the capture stream in ONE
             # PortAudio open — Bluetooth SCO devices abort with heap
@@ -1032,22 +1157,25 @@ class PortAudioCaptureSource:
                     "frames_per_buffer": CAPTURE_CHUNK,
                 }
 
-                # Use resolved device (skip if already system default)
-                try:
-                    default_idx = audio_instance.get_default_input_device_info().get("index")
-                except (IOError, OSError):
-                    default_idx = None
-                if resolved_device_index is not None and resolved_device_index != default_idx:
+                if resolved_device_index is not None:
                     stream_kwargs["input_device_index"] = resolved_device_index
 
                 with pulse_source_env(pulse_name):
                     new_stream = audio_instance.open(**stream_kwargs)
 
             # Test the stream by reading a small amount of data
-            test_data = new_stream.read(CAPTURE_CHUNK, exception_on_overflow=False)
+            test_data = _read_frames_bounded(
+                new_stream, CAPTURE_CHUNK, should_continue=should_continue
+            )
+            if should_continue is not None and not should_continue():
+                _safe_close_stream(new_stream)
+                return False
 
             if test_data:
                 self.stream = new_stream
+                self.resolved_device_name = _get_device_info_safe(
+                    audio_instance, resolved_device_index
+                ).get("name")
                 logger.info("Audio reconnection successful")
                 return True
             else:
@@ -1056,6 +1184,7 @@ class PortAudioCaptureSource:
                 return False
 
         except (IOError, OSError) as e:
+            self.last_error = e
             logger.error(f"Audio reconnection failed: {e}")
             _safe_close_stream(new_stream)
             return False

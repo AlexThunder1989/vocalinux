@@ -85,12 +85,14 @@ def test_stop_racing_start_is_not_lost() -> None:
 
     def release_key_on_another_thread(state: RecognitionState) -> None:
         # The first LISTENING notification is the earliest point another
-        # thread can observe the session and stop it.
+        # thread can observe the session and stop it. The stop elects on the
+        # lifecycle lock the moment the start's hold ends, so it completes
+        # right after start_recognition() returns; joining it inside the
+        # callback would stall the start it must outlive.
         if state is RecognitionState.LISTENING and not stops:
             stop = threading.Thread(target=_stop_session, args=(manager,))
             stops.append(stop)
             stop.start()
-            stop.join(timeout=5.0)
 
     manager._record_audio = record_audio
     manager.register_state_callback(release_key_on_another_thread)
@@ -99,8 +101,10 @@ def test_stop_racing_start_is_not_lost() -> None:
             with patch.object(manager, "_arm_playback_duck"):
                 assert manager.start_recognition(mode="push_to_talk")
 
-        assert stops and not stops[0].is_alive()
+        assert stops
+        stops[0].join(timeout=5.0)
         # The stop must survive the rest of start_recognition().
+        assert not stops[0].is_alive()
         assert manager.should_record is False
         assert manager.audio_thread is not None
         manager.audio_thread.join(timeout=1.0)
@@ -120,7 +124,7 @@ def test_stop_completes_while_capture_read_is_blocked() -> None:
     source.requires_pyaudio = False
     source.sample_rate = 16000
 
-    def read_chunk() -> bytes:
+    def read_chunk(*args: object, **kwargs: object) -> bytes:
         # The first read returns normally, every later one stalls like a
         # device that disappeared under the audio server.
         if first_read_done.is_set():
