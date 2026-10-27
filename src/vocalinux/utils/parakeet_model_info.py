@@ -53,9 +53,23 @@ PARAKEET_MODEL_INFO: Dict[str, Dict[str, Any]] = {
         "size_mb": 630,
         "desc": "Parakeet TDT 0.6B v2 (int8), English",
     },
+    "bark-3.0": {
+        "repo": "velddev/Underdog-Bark-3.0-sherpa-onnx",
+        "revision": "f438275bc431c58010eadb982dd0f8693ff4364f",
+        "files": [
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "joiner.int8.onnx",
+            "tokens.txt",
+            "LICENSE",
+            "NOTICE",
+        ],
+        "size_mb": 653,
+        "desc": "Underdog Bark 3.0 (int8), English; CC BY 4.0",
+    },
 }
 
-MODEL_SIZES = ["v3-european", "v2-english", "orukeet-v0.1.0"]
+MODEL_SIZES = ["v3-european", "v2-english", "orukeet-v0.1.0", "bark-3.0"]
 
 # Model offered when the engine has nothing downloaded yet.
 RECOMMENDED_MODEL = "v3-european"

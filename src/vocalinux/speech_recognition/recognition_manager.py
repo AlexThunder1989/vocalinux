@@ -2377,7 +2377,7 @@ class SpeechRecognitionManager:
                 stream = self.model.create_stream()
                 stream.accept_waveform(16000, audio_float)
                 self.model.decode_stream(stream)
-                return cast(str, stream.result.text.strip())
+                return " ".join(stream.result.text.replace("<unk>", " ").split())
 
         except (RuntimeError, OSError, ValueError) as e:
             audio_info = (
