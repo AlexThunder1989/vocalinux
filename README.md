@@ -459,3 +459,5 @@ model and default whisper.cpp engine stay unchanged. The download comes from a
 pinned revision and every file is checked against its bundled SHA-256 pin. The
 model occupies about 653 MiB; its CC BY 4.0 license and attribution notice are
 included.
+Choose it for English dictation of conversational speech; for read or
+multilingual speech keep `v3-european`.

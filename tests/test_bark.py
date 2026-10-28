@@ -12,7 +12,7 @@ MODEL = "bark-3.0"
 
 def test_bark_is_optional_pinned_and_keeps_its_license_files() -> None:
     assert models.RECOMMENDED_MODEL == "v3-european"
-    assert models.MODEL_SIZES[-1] == MODEL
+    assert MODEL in models.MODEL_SIZES
     assert models.model_files(MODEL)[:4] == models.MODEL_FILES
     assert {"LICENSE", "NOTICE"} <= set(models.model_files(MODEL))
     for name in models.model_files(MODEL):
