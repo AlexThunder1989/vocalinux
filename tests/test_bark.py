@@ -11,6 +11,7 @@ MODEL = "bark-3.0"
 
 
 def test_bark_is_optional_pinned_and_keeps_its_license_files() -> None:
+    """bark-3.0 is offered but not recommended, and every file it downloads is pinned."""
     assert models.RECOMMENDED_MODEL == "v3-european"
     assert MODEL in models.MODEL_SIZES
     assert models.model_files(MODEL)[:4] == models.MODEL_FILES
@@ -24,6 +25,7 @@ def test_bark_is_optional_pinned_and_keeps_its_license_files() -> None:
 
 
 def test_unknown_word_token_is_dropped_from_the_transcript() -> None:
+    """Parakeet transcripts drop <unk> and collapse the spaces it leaves."""
     manager = SpeechRecognitionManager.__new__(SpeechRecognitionManager)
     manager._model_lock = threading.Lock()
     manager.model = MagicMock()
