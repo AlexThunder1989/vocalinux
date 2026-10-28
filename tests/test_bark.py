@@ -1,27 +1,50 @@
-"""Optional Underdog Bark 3.0 catalog entry and its <unk> output."""
+"""Optional Underdog Bark 3.0 catalog entries, their file names and <unk> output."""
 
+import sys
 import threading
 from unittest.mock import MagicMock
+
+import pytest
 
 from vocalinux.speech_recognition.recognition_manager import SpeechRecognitionManager
 from vocalinux.utils import parakeet_model_info as models
 from vocalinux.utils.model_checksums import expected_for
 
-MODEL = "bark-3.0"
 
-
-def test_bark_is_optional_pinned_and_keeps_its_license_files() -> None:
-    """bark-3.0 is offered but not recommended, and every file it downloads is pinned."""
+@pytest.mark.parametrize(
+    "model, repo, precision",
+    [
+        ("bark-3.0", "velddev/Underdog-Bark-3.0-sherpa-onnx", "int8"),
+        ("bark-3.0-int4", "velddev/Underdog-Bark-3.0-sherpa-onnx", "int4"),
+    ],
+)
+def test_bark_is_optional_pinned_and_keeps_its_license_files(model, repo, precision) -> None:
+    """Both Bark builds are offered but not recommended, and every file they download is pinned."""
     assert models.RECOMMENDED_MODEL == "v3-european"
-    assert MODEL in models.MODEL_SIZES
-    assert models.model_files(MODEL)[:4] == models.MODEL_FILES
-    assert {"LICENSE", "NOTICE"} <= set(models.model_files(MODEL))
-    for name in models.model_files(MODEL):
-        assert expected_for(models.manifest_key(MODEL, name)) is not None
-    assert models.get_model_file_url(MODEL, "encoder.int8.onnx") == (
-        "https://huggingface.co/velddev/Underdog-Bark-3.0-sherpa-onnx/resolve/"
-        "f438275bc431c58010eadb982dd0f8693ff4364f/encoder.int8.onnx?download=true"
-    )
+    assert model in models.MODEL_SIZES
+    assert {"LICENSE", "NOTICE", f"encoder.{precision}.onnx"} <= set(models.model_files(model))
+    for name in models.model_files(model):
+        assert expected_for(models.manifest_key(model, name)) is not None
+    assert models.get_model_file_url(model, "NOTICE").startswith(f"https://huggingface.co/{repo}/")
+
+
+def test_int4_build_loads_its_own_file_names(monkeypatch, tmp_path) -> None:
+    """The 4-bit entry's precision key makes the loader open the *.int4.onnx files."""
+    manager = SpeechRecognitionManager.__new__(SpeechRecognitionManager)
+    manager.model_size = "bark-3.0-int4"
+    manager._defer_download = False
+    sherpa = MagicMock()
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", sherpa)
+    monkeypatch.setattr(models, "get_model_path", lambda _: str(tmp_path))
+    monkeypatch.setattr(models, "is_model_downloaded", lambda _: True)
+    monkeypatch.setattr(manager, "_parakeet_model_is_verified", lambda *_: True)
+    manager._init_parakeet()
+    kwargs = sherpa.OfflineRecognizer.from_transducer.call_args.kwargs
+    assert [kwargs[part].rsplit("/", 1)[1] for part in ("encoder", "decoder", "joiner")] == [
+        "encoder.int4.onnx",
+        "decoder.int4.onnx",
+        "joiner.int4.onnx",
+    ]
 
 
 def test_unknown_word_token_is_dropped_from_the_transcript() -> None:

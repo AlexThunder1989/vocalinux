@@ -447,17 +447,13 @@ in Hugging Face's normal model-download accounting. Cached recognition works
 offline and does not send audio or usage events. The model occupies about
 641 MiB; its CC BY-SA 4.0 weights license and NVIDIA attribution are included.
 
-### Optional Underdog Bark 3.0 model
+### Optional Underdog Bark 3.0 models
 
-Settings → Speech Model → Parakeet also offers `bark-3.0`:
+Settings → Speech Model → Parakeet also offers two builds of
 [Underdog Bark 3.0](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0), an
-English-only fine-tune of Parakeet TDT 0.6B v3 by Conway Research, as the int8
-sherpa-onnx conversion at
-[velddev/Underdog-Bark-3.0-sherpa-onnx](https://huggingface.co/velddev/Underdog-Bark-3.0-sherpa-onnx).
-It runs on the existing local sherpa-onnx recognizer; the recommended Parakeet
-model and default whisper.cpp engine stay unchanged. The download comes from a
-pinned revision and every file is checked against its bundled SHA-256 pin. The
-model occupies about 653 MiB; its CC BY 4.0 license and attribution notice are
-included.
-Choose it for English dictation of conversational speech; for read or
-multilingual speech keep `v3-european`.
+English fine-tune of Parakeet TDT 0.6B v3 (CC BY 4.0): `bark-3.0` (int8, 653 MiB)
+and `bark-3.0-int4` (4-bit, 379 MiB, about half the memory, slower). Both run on
+the existing sherpa-onnx recognizer from pinned, checksummed downloads that
+include their license and attribution notice.
+Choose one for English dictation of conversational speech, `bark-3.0-int4` when
+memory is tight; for read or multilingual speech keep `v3-european`.
