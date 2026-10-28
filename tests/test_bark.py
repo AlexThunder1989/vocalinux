@@ -2,6 +2,7 @@
 
 import sys
 import threading
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,25 +11,23 @@ from vocalinux.speech_recognition.recognition_manager import SpeechRecognitionMa
 from vocalinux.utils import parakeet_model_info as models
 from vocalinux.utils.model_checksums import expected_for
 
+REPO = "velddev/Underdog-Bark-3.0-sherpa-onnx"
 
-@pytest.mark.parametrize(
-    "model, repo, precision",
-    [
-        ("bark-3.0", "velddev/Underdog-Bark-3.0-sherpa-onnx", "int8"),
-        ("bark-3.0-int4", "velddev/Underdog-Bark-3.0-sherpa-onnx", "int4"),
-    ],
-)
-def test_bark_is_optional_pinned_and_keeps_its_license_files(model, repo, precision) -> None:
+
+@pytest.mark.parametrize("model, precision", [("bark-3.0", "int8"), ("bark-3.0-int4", "int4")])
+def test_bark_is_optional_pinned_and_keeps_its_license_files(model: str, precision: str) -> None:
     """Both Bark builds are offered but not recommended, and every file they download is pinned."""
     assert models.RECOMMENDED_MODEL == "v3-european"
     assert model in models.MODEL_SIZES
     assert {"LICENSE", "NOTICE", f"encoder.{precision}.onnx"} <= set(models.model_files(model))
     for name in models.model_files(model):
         assert expected_for(models.manifest_key(model, name)) is not None
-    assert models.get_model_file_url(model, "NOTICE").startswith(f"https://huggingface.co/{repo}/")
+    assert models.get_model_file_url(model, "NOTICE").startswith(f"https://huggingface.co/{REPO}/")
 
 
-def test_int4_build_loads_its_own_file_names(monkeypatch, tmp_path) -> None:
+def test_int4_build_loads_its_own_file_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """The 4-bit entry's precision key makes the loader open the *.int4.onnx files."""
     manager = SpeechRecognitionManager.__new__(SpeechRecognitionManager)
     manager.model_size = "bark-3.0-int4"
